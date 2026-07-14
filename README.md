@@ -2,6 +2,14 @@
 
 Teachable Machine 이미지 모델을 사용하는 오프라인 가위바위보 웹 게임입니다. 실행 시 인터넷 연결이 필요하지 않습니다.
 
+## 바로 실행하기
+
+설치 없이 아래 주소를 Chrome 또는 Edge에서 열고 카메라 권한을 허용하세요.
+
+**https://aquariurn.github.io/rcp-web/**
+
+> 배포된 웹사이트를 사용할 때는 모델과 라이브러리를 처음 내려받기 위한 인터넷 연결이 필요합니다. Python이나 별도 프로그램은 설치하지 않아도 됩니다.
+
 ## 모델 준비
 
 1. Teachable Machine 모델 화면에서 `Export Model`을 누릅니다.
