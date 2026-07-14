@@ -1,0 +1,92 @@
+<!doctype html>
+<html lang="ko">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="theme-color" content="#f6f2ea" />
+    <title>손끝 승부 — AI 가위바위보</title>
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <div class="grain" aria-hidden="true"></div>
+    <main class="page-shell">
+      <header class="topbar">
+        <a class="brand" href="#" aria-label="처음으로">
+          <span class="brand-mark">✌</span>
+          <span>손끝 승부</span>
+        </a>
+        <button class="icon-button" id="settingsButton" type="button" aria-label="모델 설정 열기">⚙</button>
+      </header>
+
+      <section class="hero">
+        <p class="eyebrow">AI CAMERA GAME</p>
+        <h1>자, 무엇을<br /><em>내시겠어요?</em></h1>
+        <p class="intro">카메라 앞에 손을 보여주세요.<br />AI가 당신의 가위바위보를 알아맞힐게요.</p>
+      </section>
+
+      <section class="scoreboard" aria-label="점수판">
+        <div><span>나</span><strong id="playerScore">0</strong></div>
+        <div class="score-divider"><span>ROUND</span><strong id="roundCount">0</strong></div>
+        <div><span>컴퓨터</span><strong id="computerScore">0</strong></div>
+      </section>
+
+      <section class="arena">
+        <article class="camera-card">
+          <div class="card-label"><span class="live-dot"></span> CAMERA</div>
+          <div class="camera-frame" id="cameraFrame">
+            <div id="webcamContainer"></div>
+            <div class="camera-placeholder" id="cameraPlaceholder">
+              <span class="hand-doodle">☝</span>
+              <p>카메라를 켜고<br />손을 보여주세요</p>
+            </div>
+            <div class="scan-line" aria-hidden="true"></div>
+            <div class="countdown" id="countdown" aria-live="assertive"></div>
+          </div>
+          <div class="prediction-row">
+            <span>AI의 예측</span>
+            <strong id="prediction">준비 중</strong>
+            <span id="confidence">—</span>
+          </div>
+        </article>
+
+        <div class="versus" aria-hidden="true"><span>VS</span></div>
+
+        <article class="computer-card">
+          <div class="card-label">COMPUTER</div>
+          <div class="computer-choice" id="computerChoice">
+            <span class="choice-emoji">?</span>
+            <p>아직 고민 중…</p>
+          </div>
+        </article>
+      </section>
+
+      <section class="result-panel" id="resultPanel" aria-live="polite">
+        <p id="resultText">카메라를 켜면 게임을 시작할 수 있어요.</p>
+      </section>
+
+      <div class="actions">
+        <button class="primary-button" id="startButton" type="button">
+          <span id="startButtonText">카메라 켜기</span><span>→</span>
+        </button>
+        <button class="text-button" id="resetButton" type="button">점수 초기화</button>
+      </div>
+    </main>
+
+    <dialog id="settingsDialog">
+      <form method="dialog" class="settings-form">
+        <div class="dialog-heading">
+          <div><p class="eyebrow">MODEL SETUP</p><h2>AI 모델 연결</h2></div>
+          <button class="close-button" value="cancel" aria-label="닫기">×</button>
+        </div>
+        <p class="help-text">오프라인 모델은 프로젝트의 <b>model</b> 폴더에서 자동으로 불러옵니다. 클래스 이름은 <b>가위, 바위, 보</b> 또는 <b>scissors, rock, paper</b>를 인식합니다.</p>
+        <div class="model-path"><span>모델 위치</span><code>model/model.json</code></div>
+        <p class="field-note" id="modelStatus">모델 상태를 확인하는 중입니다.</p>
+        <button class="save-button" id="saveModelButton" value="default" type="button">로컬 모델 다시 불러오기</button>
+      </form>
+    </dialog>
+
+    <script src="vendor/tf.min.js"></script>
+    <script src="vendor/teachablemachine-image.min.js"></script>
+    <script src="app.js"></script>
+  </body>
+</html>

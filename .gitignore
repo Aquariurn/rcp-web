@@ -1,0 +1,4 @@
+.DS_Store
+
+# Teachable Machine 모델은 model/ 폴더의 사본만 사용합니다.
+vendor/rcp/
