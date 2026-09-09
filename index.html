@@ -65,7 +65,7 @@
       </section>
 
       <div class="actions">
-        <button class="primary-button" id="startButton" type="button">
+        <button class="primary-button" id="startButton" type="button" disabled>
           <span id="startButtonText">카메라 켜기</span><span>→</span>
         </button>
         <button class="text-button" id="resetButton" type="button">점수 초기화</button>
@@ -80,8 +80,8 @@
         </div>
         <p class="help-text">오프라인 모델은 프로젝트의 <b>model</b> 폴더에서 자동으로 불러옵니다. 클래스 이름은 <b>가위, 바위, 보</b> 또는 <b>scissors, rock, paper</b>를 인식합니다.</p>
         <div class="model-path"><span>모델 위치</span><code>model/model.json</code></div>
-        <p class="field-note" id="modelStatus">모델 상태를 확인하는 중입니다.</p>
-        <button class="save-button" id="saveModelButton" value="default" type="button">로컬 모델 다시 불러오기</button>
+        <p class="field-note" id="modelStatus" aria-live="polite">모델 상태를 확인하는 중입니다.</p>
+        <button class="save-button" id="saveModelButton" value="default" type="button" disabled>로컬 모델 다시 불러오기</button>
       </form>
     </dialog>
 
