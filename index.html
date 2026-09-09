@@ -72,16 +72,36 @@
       </div>
     </main>
 
-    <dialog id="settingsDialog">
+    <dialog id="settingsDialog" aria-labelledby="settingsTitle">
       <form method="dialog" class="settings-form">
         <div class="dialog-heading">
-          <div><p class="eyebrow">MODEL SETUP</p><h2>AI 모델 연결</h2></div>
+          <div><p class="eyebrow">MODEL SETUP</p><h2 id="settingsTitle">AI 모델 연결</h2></div>
           <button class="close-button" value="cancel" aria-label="닫기">×</button>
         </div>
-        <p class="help-text">오프라인 모델은 프로젝트의 <b>model</b> 폴더에서 자동으로 불러옵니다. 클래스 이름은 <b>가위, 바위, 보</b> 또는 <b>scissors, rock, paper</b>를 인식합니다.</p>
-        <div class="model-path"><span>모델 위치</span><code>model/model.json</code></div>
-        <p class="field-note" id="modelStatus" aria-live="polite">모델 상태를 확인하는 중입니다.</p>
-        <button class="save-button" id="saveModelButton" value="default" type="button" disabled>로컬 모델 다시 불러오기</button>
+        <p class="help-text">Teachable Machine에서 이미지 모델을 <b>TensorFlow.js</b> 형식으로 내려받아 압축을 푼 뒤 모델 파일을 선택하세요. 클래스 이름은 <b>가위, 바위, 보</b> 또는 <b>scissors, rock, paper</b>를 인식합니다.</p>
+
+        <fieldset class="model-files" aria-describedby="modelFileHelp">
+          <legend>내 모델 파일</legend>
+          <label class="file-field">
+            <span>모델 구조</span>
+            <input id="modelFileInput" type="file" accept=".json,application/json" />
+          </label>
+          <label class="file-field">
+            <span>모델 가중치</span>
+            <input id="weightsFileInput" type="file" accept=".bin,application/octet-stream" multiple />
+          </label>
+          <label class="file-field">
+            <span>모델 정보</span>
+            <input id="metadataFileInput" type="file" accept=".json,application/json" />
+          </label>
+        </fieldset>
+        <p class="privacy-note" id="modelFileHelp">선택한 파일은 서버로 전송되지 않으며 현재 브라우저 탭에서만 사용됩니다. 가중치 파일이 여러 개라면 모두 선택하세요.</p>
+        <button class="save-button" id="uploadModelButton" type="button" disabled>선택한 모델 적용</button>
+
+        <div class="model-divider"><span>또는</span></div>
+        <div class="model-path"><span>현재 모델</span><strong id="modelSource">확인 중</strong></div>
+        <p class="field-note" id="modelStatus" role="status" aria-live="polite" aria-atomic="true">모델 상태를 확인하는 중입니다.</p>
+        <button class="secondary-button" id="saveModelButton" value="default" type="button" disabled>기본 모델 사용</button>
       </form>
     </dialog>
 
