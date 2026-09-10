@@ -61,3 +61,9 @@ node --test tests/app.test.cjs
 ```
 
 기본 모델과 사용자 파일의 로딩·검증·해제, 카메라 실패·페이지 이탈, 추론 오류 복구, 승패·점수 초기화를 검증합니다. 실제 모델의 CPU 추론과 가중치 해제도 확인하며, 카메라 권한과 화면 표시는 브라우저에서 별도로 확인해야 합니다.
+
+## 배포
+
+GitHub Pages 배포는 `.github/workflows/deploy-pages.yml`에서 관리합니다. Pull Request를 `main` 브랜치에 병합하거나 `main`에 직접 푸시했을 때만 테스트를 실행하고, 테스트가 통과한 파일을 배포합니다. 기능 브랜치의 푸시는 배포하지 않습니다.
+
+저장소의 **Settings → Pages → Build and deployment → Source**는 **GitHub Actions**로 설정해야 합니다.
