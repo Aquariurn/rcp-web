@@ -13,12 +13,39 @@ function deferred() {
   return { promise, resolve, reject };
 }
 
+function fakeFile(name, contents, { type = "application/octet-stream", size } = {}) {
+  const initialText = typeof contents === "string" ? contents : JSON.stringify(contents);
+  return {
+    name, type, size: size ?? Buffer.byteLength(initialText ?? ""),
+    async text() {
+      const value = contents?.promise ? await contents.promise : contents;
+      if (value instanceof Error) throw value;
+      return typeof value === "string" ? value : JSON.stringify(value);
+    },
+  };
+}
+
+function uploadedFiles({ metadata, modelDefinition, weightFiles } = {}) {
+  const definition = modelDefinition ?? {
+    modelTopology: { class_name: "Model" },
+    weightsManifest: [{ paths: ["weights.bin"], weights: [] }],
+  };
+  const expectedWeights = definition.weightsManifest?.flatMap((group) => group.paths || []) ?? [];
+  return {
+    modelFile: fakeFile("model.json", definition, { type: "application/json" }),
+    weightFiles: weightFiles ?? expectedWeights.map((filePath) => fakeFile(path.basename(filePath), "weights")),
+    metadataFile: fakeFile("metadata.json", metadata ?? {
+      labels: ["가위", "바위", "보"], imageSize: 224, modelName: "사용자 모델",
+    }, { type: "application/json" }),
+  };
+}
+
 function element() {
   const listeners = new Map();
   const classes = new Set();
   let text = "";
   return {
-    disabled: false, hidden: false, innerHTML: "", children: [], offsetWidth: 0,
+    disabled: false, hidden: false, innerHTML: "", children: [], offsetWidth: 0, files: [], value: "",
     get textContent() { return text; },
     set textContent(value) { text = String(value); },
     get className() { return [...classes].join(" "); },
@@ -37,6 +64,8 @@ function element() {
       if (!listeners.has(name)) listeners.set(name, []);
       listeners.get(name).push(listener);
     },
+    setAttribute(name, value) { this.attributes ??= {}; this.attributes[name] = String(value); },
+    getAttribute(name) { return this.attributes?.[name] ?? null; },
     dispatch(name, event = {}) { return listeners.get(name)?.map((listener) => listener(event)); },
     replaceChildren(...children) { this.children = children; },
     showModal() { this.open = true; },
@@ -44,7 +73,8 @@ function element() {
   };
 }
 
-function makeModel(name, { labels = ["가위", "바위", "보"], count = labels.length, events = [] } = {}) {
+function makeModel(name, { labels = ["가위", "바위", "보"], count = labels.length,
+  inputShape = [null, 224, 224, 3], outputShape = [null, count], events = [] } = {}) {
   const control = { error: null, pending: null, predictions: [{ className: "바위", probability: 0.96 }] };
   return {
     name, control, disposed: 0,
@@ -58,6 +88,8 @@ function makeModel(name, { labels = ["가위", "바위", "보"], count = labels.
       return predictions;
     },
     model: {
+      inputs: [{ shape: inputShape }],
+      outputs: [{ shape: outputShape }],
       getWeights: () => [],
       dispose() { events.push(`${name}:dispose`); this.owner.disposed += 1; },
     },
@@ -68,6 +100,8 @@ function fixture({ initial, events = [] } = {}) {
   const defaultModel = makeModel("initial", { events });
   defaultModel.model.owner = defaultModel;
   const loads = [initial ?? defaultModel];
+  const localLoads = [];
+  const browserFileLoads = [];
   const elements = new Map();
   const frames = new Map();
   const timers = new Map();
@@ -78,9 +112,17 @@ function fixture({ initial, events = [] } = {}) {
   let preparedLoad;
   const tf = {
     dispose(weights) { weights.forEach((weight) => weight.dispose()); },
-    async loadLayersModel() {
+    io: {
+      browserFiles(files) {
+        events.push("browser-files");
+        browserFileLoads.push(files);
+        return { type: "browser-files", files };
+      },
+    },
+    async loadLayersModel(source) {
       control.loadCalls += 1;
-      const result = preparedLoad;
+      const result = source?.type === "browser-files" ? localLoads.shift() : preparedLoad;
+      if (!result) throw new Error("unexpected model load");
       if (result instanceof Error) throw result;
       const loaded = result?.promise ? await result.promise : result;
       return loaded.model;
@@ -173,7 +215,7 @@ function fixture({ initial, events = [] } = {}) {
     model.model.owner = model;
     return model;
   }
-  return { control, defaultModel, candidate, loads, ui, run, frames, timers, cameras, events, beginFrame, frame, tick, finish,
+  return { control, defaultModel, candidate, loads, localLoads, browserFileLoads, ui, run, frames, timers, cameras, events, beginFrame, frame, tick, finish,
     hide: () => page.dispatch("pagehide", { persisted: false }),
     show: () => page.dispatch("pageshow", { persisted: true }),
   };
@@ -185,6 +227,20 @@ async function runningFixture() {
   await f.run("startCamera()");
   await f.frame();
   return f;
+}
+
+function selectUploadedFiles(f, { modelFile = [], weightFiles = [], metadataFile = [] } = {}) {
+  f.ui("modelFileInput").files = Array.isArray(modelFile) ? modelFile : [modelFile];
+  f.ui("weightsFileInput").files = weightFiles;
+  f.ui("metadataFileInput").files = Array.isArray(metadataFile) ? metadataFile : [metadataFile];
+  for (const id of ["modelFileInput", "weightsFileInput", "metadataFileInput"]) {
+    f.ui(id).dispatch("change");
+  }
+}
+
+async function clickAndWait(f, id) {
+  await Promise.all(f.ui(id).dispatch("click") ?? []);
+  await flush();
 }
 
 function scores(f) { return ["playerScore", "computerScore", "roundCount"].map((id) => Number(f.ui(id).textContent)); }
@@ -226,6 +282,7 @@ test("failed initial load displays failure and keeps play unavailable", async ()
   await flush();
   assert.equal(f.ui("startButton").disabled, true);
   assert.equal(f.ui("saveModelButton").disabled, false);
+  assert.equal(f.ui("modelSource").textContent, "연결 안 됨");
   assert.equal(f.ui("modelStatus").classList.contains("error"), true);
   assert.match(f.ui("modelStatus").textContent, /실패|불러오지 못|확인/);
 });
@@ -300,6 +357,317 @@ test("model replacement waits for the old model's in-flight prediction before di
   assert.ok(f.events.lastIndexOf("initial:predict:end") < f.events.indexOf("initial:dispose"));
   await f.frame();
   assert.equal(f.ui("prediction").textContent, "보");
+});
+
+test("upload controls require one model, at least one weight, and one metadata file", async () => {
+  const f = fixture(); await flush();
+  const files = uploadedFiles();
+  const modelInput = f.ui("modelFileInput");
+  const weightsInput = f.ui("weightsFileInput");
+  const metadataInput = f.ui("metadataFileInput");
+
+  assert.equal(f.ui("uploadModelButton").disabled, true);
+  modelInput.files = [files.modelFile]; modelInput.dispatch("change");
+  assert.equal(f.ui("uploadModelButton").disabled, true);
+  weightsInput.files = files.weightFiles; weightsInput.dispatch("change");
+  assert.equal(f.ui("uploadModelButton").disabled, true);
+  metadataInput.files = [files.metadataFile]; metadataInput.dispatch("change");
+  assert.equal(f.ui("uploadModelButton").disabled, false);
+  assert.match(f.ui("modelStatus").textContent, /3개.*준비/);
+  assert.equal(modelInput.getAttribute("aria-invalid"), "false");
+
+  weightsInput.files = []; weightsInput.dispatch("change");
+  assert.equal(f.ui("uploadModelButton").disabled, true);
+  assert.match(f.ui("modelStatus").textContent, /함께|모든 가중치/);
+});
+
+test("valid uploaded files replace the model in manifest order and keep the dialog open", async () => {
+  const f = await runningFixture();
+  const firstWeight = fakeFile("first.bin", "first");
+  const secondWeight = fakeFile("second.bin", "second");
+  const files = uploadedFiles({
+    modelDefinition: {
+      modelTopology: { class_name: "Model" },
+      weightsManifest: [
+        { paths: ["weights/first.bin"], weights: [] },
+        { paths: ["second.bin"], weights: [] },
+      ],
+    },
+    weightFiles: [secondWeight, firstWeight],
+  });
+  const candidate = f.candidate("uploaded");
+  candidate.control.predictions = [{ className: "보", probability: 0.99 }];
+  f.localLoads.push(candidate);
+  selectUploadedFiles(f, files);
+  f.ui("settingsDialog").showModal();
+
+  await clickAndWait(f, "uploadModelButton");
+
+  assert.equal(f.defaultModel.disposed, 1);
+  assert.equal(candidate.disposed, 0);
+  assert.equal(f.ui("settingsDialog").open, true);
+  assert.equal(f.ui("modelSource").textContent, "업로드 · 사용자 모델");
+  assert.equal(f.ui("modelStatus").classList.contains("error"), false);
+  assert.equal(f.browserFileLoads.length, 1);
+  assert.equal(f.browserFileLoads[0][0], files.modelFile);
+  assert.deepEqual(Array.from(f.browserFileLoads[0], (file) => file.name), ["model.json", "first.bin", "second.bin"]);
+  await f.frame();
+  assert.equal(f.ui("prediction").textContent, "보");
+});
+
+test("missing upload files are rejected before model allocation", async () => {
+  const f = fixture(); await flush();
+  const files = uploadedFiles();
+  const selections = [
+    { weightFiles: files.weightFiles, metadataFile: files.metadataFile },
+    { modelFile: files.modelFile, metadataFile: files.metadataFile },
+    { modelFile: files.modelFile, weightFiles: files.weightFiles },
+  ];
+
+  for (const selection of selections) {
+    selectUploadedFiles(f, selection);
+    assert.equal(await f.run("loadUploadedModel()"), false);
+    assert.equal(f.ui("uploadModelButton").disabled, true);
+    assert.equal(f.ui("modelFileInput").getAttribute("aria-invalid"), "true");
+    assert.match(f.ui("modelStatus").textContent, /함께 선택/);
+  }
+  assert.equal(f.control.loadCalls, 1);
+  assert.equal(f.browserFileLoads.length, 0);
+  assert.equal(f.defaultModel.disposed, 0);
+});
+
+test("malformed metadata and model JSON preserve the working model", async () => {
+  for (const invalidPart of ["metadata", "model"]) {
+    const f = await runningFixture();
+    const files = uploadedFiles();
+    if (invalidPart === "metadata") files.metadataFile = fakeFile("metadata.json", "{ broken", { type: "application/json" });
+    else files.modelFile = fakeFile("model.json", "{ broken", { type: "application/json" });
+    selectUploadedFiles(f, files);
+
+    await clickAndWait(f, "uploadModelButton");
+
+    assert.equal(f.browserFileLoads.length, 0);
+    assert.equal(f.defaultModel.disposed, 0);
+    assert.equal(f.ui("modelSource").textContent, "기본 모델");
+    assert.equal(f.ui("modelStatus").classList.contains("error"), true);
+    assert.match(f.ui("modelStatus").textContent, new RegExp(`${invalidPart === "metadata" ? "metadata" : "model"}\\.json`));
+    await f.frame();
+    assert.equal(f.ui("prediction").textContent, "바위");
+  }
+});
+
+test("oversized uploaded files are rejected before TensorFlow loading", async () => {
+  const cases = [
+    (files) => { files.metadataFile = fakeFile("metadata.json", {}, { size: 256 * 1024 + 1 }); },
+    (files) => { files.modelFile = fakeFile("model.json", {}, { size: 5 * 1024 * 1024 + 1 }); },
+    (files) => { files.weightFiles = [fakeFile("weights.bin", "weights", { size: 64 * 1024 * 1024 + 1 })]; },
+  ];
+
+  for (const makeOversized of cases) {
+    const f = await runningFixture();
+    const files = uploadedFiles();
+    makeOversized(files);
+    selectUploadedFiles(f, files);
+
+    await clickAndWait(f, "uploadModelButton");
+
+    assert.equal(f.browserFileLoads.length, 0);
+    assert.equal(f.defaultModel.disposed, 0);
+    assert.match(f.ui("modelStatus").textContent, /너무 커요|64MB/);
+    await f.frame();
+    assert.equal(f.ui("prediction").textContent, "바위");
+  }
+});
+
+test("a weights manifest mismatch is rejected before TensorFlow loading", async () => {
+  const f = await runningFixture();
+  const files = uploadedFiles({
+    modelDefinition: {
+      modelTopology: { class_name: "Model" },
+      weightsManifest: [{ paths: ["expected.bin"], weights: [] }],
+    },
+    weightFiles: [fakeFile("different.bin", "weights")],
+  });
+  selectUploadedFiles(f, files);
+
+  await clickAndWait(f, "uploadModelButton");
+
+  assert.equal(f.browserFileLoads.length, 0);
+  assert.equal(f.control.loadCalls, 1);
+  assert.equal(f.defaultModel.disposed, 0);
+  assert.match(f.ui("modelStatus").textContent, /가중치.*맞지/);
+  await f.frame();
+});
+
+test("invalid uploaded labels are rejected before reading model weights", async () => {
+  const f = await runningFixture();
+  const files = uploadedFiles({ metadata: { labels: ["가위", "바위", "배경"], imageSize: 224 } });
+  selectUploadedFiles(f, files);
+
+  await clickAndWait(f, "uploadModelButton");
+
+  assert.equal(f.browserFileLoads.length, 0);
+  assert.equal(f.control.loadCalls, 1);
+  assert.equal(f.defaultModel.disposed, 0);
+  assert.match(f.ui("modelStatus").textContent, /가위, 바위, 보/);
+  await f.frame();
+});
+
+test("an uploaded model with an incompatible input or output shape is disposed while the working model survives", async () => {
+  for (const options of [
+    { inputShape: [null, 192, 192, 3] },
+    { outputShape: [null, 1, 3] },
+  ]) {
+    const f = await runningFixture();
+    const files = uploadedFiles();
+    const candidate = f.candidate("wrong-shape", options);
+    f.localLoads.push(candidate);
+    selectUploadedFiles(f, files);
+
+    await clickAndWait(f, "uploadModelButton");
+
+    assert.equal(f.browserFileLoads.length, 1);
+    assert.equal(candidate.disposed, 1);
+    assert.equal(f.defaultModel.disposed, 0);
+    assert.equal(f.ui("modelSource").textContent, "기본 모델");
+    assert.match(f.ui("modelStatus").textContent, /입력·출력 규격/);
+    await f.frame();
+    assert.equal(f.ui("prediction").textContent, "바위");
+  }
+});
+
+test("a local TensorFlow load failure preserves the working model", async () => {
+  const f = await runningFixture();
+  const files = uploadedFiles();
+  f.localLoads.push(new Error("injected local load failure"));
+  selectUploadedFiles(f, files);
+
+  await clickAndWait(f, "uploadModelButton");
+
+  assert.equal(f.browserFileLoads.length, 1);
+  assert.equal(f.defaultModel.disposed, 0);
+  assert.equal(f.ui("modelSource").textContent, "기본 모델");
+  assert.equal(f.ui("modelStatus").classList.contains("error"), true);
+  await f.frame();
+  assert.equal(f.ui("prediction").textContent, "바위");
+});
+
+test("duplicate upload clicks start only one local model load", async () => {
+  const f = fixture(); await flush();
+  const files = uploadedFiles();
+  const pending = deferred();
+  const candidate = f.candidate("uploaded");
+  f.localLoads.push(pending);
+  selectUploadedFiles(f, files);
+
+  const firstClick = f.ui("uploadModelButton").dispatch("click") ?? [];
+  const secondClick = f.ui("uploadModelButton").dispatch("click") ?? [];
+  await flush();
+
+  assert.equal(f.browserFileLoads.length, 1);
+  assert.equal(f.control.loadCalls, 2);
+  assert.equal(f.ui("uploadModelButton").disabled, true);
+  assert.equal(f.ui("modelFileInput").disabled, true);
+  pending.resolve(candidate);
+  await Promise.all([...firstClick, ...secondClick]);
+  assert.equal(f.defaultModel.disposed, 1);
+  assert.equal(candidate.disposed, 0);
+});
+
+test("upload waits for an in-flight prediction before replacing its model", async () => {
+  const f = await runningFixture();
+  const predictionPending = deferred();
+  f.defaultModel.control.pending = predictionPending;
+  const prediction = f.beginFrame();
+  await flush();
+  const candidate = f.candidate("uploaded");
+  candidate.control.predictions = [{ className: "가위", probability: 0.98 }];
+  f.localLoads.push(candidate);
+  selectUploadedFiles(f, uploadedFiles());
+
+  const uploadJobs = f.ui("uploadModelButton").dispatch("click") ?? [];
+  await flush();
+  assert.equal(f.browserFileLoads.length, 0);
+  assert.equal(f.defaultModel.disposed, 0);
+
+  predictionPending.resolve([{ className: "바위", probability: 0.96 }]);
+  await prediction;
+  await Promise.all(uploadJobs);
+  assert.ok(f.events.lastIndexOf("initial:predict:end") < f.events.indexOf("initial:dispose"));
+  assert.equal(f.defaultModel.disposed, 1);
+  assert.equal(f.frames.size, 1);
+  await f.frame();
+  assert.equal(f.ui("prediction").textContent, "가위");
+});
+
+test("pagehide during a pending upload disposes both old and late models without updating the page", async () => {
+  const f = fixture(); await flush();
+  const files = uploadedFiles();
+  const pending = deferred();
+  const candidate = f.candidate("late-upload");
+  f.localLoads.push(pending);
+  selectUploadedFiles(f, files);
+  f.ui("settingsDialog").showModal();
+  const uploadJobs = f.ui("uploadModelButton").dispatch("click") ?? [];
+  await flush();
+  assert.equal(f.browserFileLoads.length, 1);
+
+  f.hide();
+  const statusAfterHide = f.ui("modelStatus").textContent;
+  pending.resolve(candidate);
+  await Promise.all(uploadJobs);
+  await flush();
+
+  assert.equal(f.defaultModel.disposed, 1);
+  assert.equal(candidate.disposed, 1);
+  assert.equal(f.ui("modelStatus").textContent, statusAfterHide);
+  assert.equal(f.ui("settingsDialog").open, true);
+  assert.equal(f.ui("startButton").disabled, true);
+  assert.equal(f.frames.size, 0);
+});
+
+test("pageshow restores the uploaded file source instead of the bundled model", async () => {
+  const f = fixture(); await flush();
+  const files = uploadedFiles();
+  const uploaded = f.candidate("uploaded");
+  f.localLoads.push(uploaded);
+  selectUploadedFiles(f, files);
+  await clickAndWait(f, "uploadModelButton");
+  assert.equal(f.loads.length, 0);
+
+  f.hide();
+  const restored = f.candidate("restored-upload");
+  f.localLoads.push(restored);
+  f.show();
+  await flush();
+
+  assert.equal(uploaded.disposed, 1);
+  assert.equal(restored.disposed, 0);
+  assert.equal(f.control.loadCalls, 3);
+  assert.equal(f.browserFileLoads.length, 2);
+  assert.deepEqual(Array.from(f.browserFileLoads[1]), Array.from(f.browserFileLoads[0]));
+  assert.equal(f.loads.length, 0, "restoration must not fetch the bundled source");
+  assert.equal(f.ui("modelSource").textContent, "업로드 · 사용자 모델");
+  assert.equal(f.ui("startButton").disabled, false);
+});
+
+test("the default model button replaces an uploaded model and updates its source", async () => {
+  const f = fixture(); await flush();
+  const uploaded = f.candidate("uploaded");
+  f.localLoads.push(uploaded);
+  selectUploadedFiles(f, uploadedFiles());
+  await clickAndWait(f, "uploadModelButton");
+
+  const restoredDefault = f.candidate("restored-default");
+  f.loads.push(restoredDefault);
+  await clickAndWait(f, "saveModelButton");
+
+  assert.equal(uploaded.disposed, 1);
+  assert.equal(restoredDefault.disposed, 0);
+  assert.equal(f.browserFileLoads.length, 1);
+  assert.equal(f.ui("modelSource").textContent, "기본 모델");
+  assert.match(f.ui("modelStatus").textContent, /연결 완료.*기본 모델/);
+  assert.equal(f.ui("startButton").disabled, false);
 });
 
 for (const stage of ["setup", "play"]) {

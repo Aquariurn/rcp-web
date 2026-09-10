@@ -7,7 +7,9 @@ const ui = {
   cameraPlaceholder: $("#cameraPlaceholder"), webcamContainer: $("#webcamContainer"), prediction: $("#prediction"),
   confidence: $("#confidence"), countdown: $("#countdown"), computerChoice: $("#computerChoice"),
   resultPanel: $("#resultPanel"), resultText: $("#resultText"), playerScore: $("#playerScore"),
-  computerScore: $("#computerScore"), roundCount: $("#roundCount"),
+  computerScore: $("#computerScore"), roundCount: $("#roundCount"), modelSource: $("#modelSource"),
+  modelFileInput: $("#modelFileInput"), weightsFileInput: $("#weightsFileInput"),
+  metadataFileInput: $("#metadataFileInput"), uploadModelButton: $("#uploadModelButton"),
 };
 
 const choices = {
@@ -20,6 +22,11 @@ const choiceNames = Object.keys(choices);
 const roundMessages = { win:"당신의 승리! 멋진 한 수였어요.", lose:"컴퓨터의 승리! 다시 도전해보세요.", draw:"무승부! 마음이 통했네요." };
 const MODEL_URL = "model/model.json";
 const METADATA_URL = "model/metadata.json";
+const DEFAULT_MODEL_SOURCE = Object.freeze({ type:"bundled" });
+const MAX_MODEL_JSON_BYTES = 5 * 1024 * 1024;
+const MAX_METADATA_BYTES = 256 * 1024;
+const MAX_WEIGHT_BYTES = 64 * 1024 * 1024;
+const MAX_WEIGHT_FILES = 32;
 const WEBCAM_WIDTH = 480;
 const WEBCAM_HEIGHT = 360;
 const MIN_PREDICTION_CONFIDENCE = 0.55;
@@ -34,6 +41,7 @@ const predictionErrorMessage = "손 모양을 인식하는 중 오류가 발생�
 
 let model = null;
 let modelLoading = false;
+let modelLoadingSource = null;
 let webcam = null;
 let startingWebcam = null;
 let cameraRunning = false;
@@ -46,6 +54,7 @@ let pageActive = true;
 let lifecycleVersion = 0;
 let predictionFrame = null;
 let predictionTask = null;
+let activeModelSource = DEFAULT_MODEL_SOURCE;
 
 function normalizeClass(className) {
   const label = typeof className === "string" ? className.trim().toLowerCase() : "";
@@ -53,11 +62,81 @@ function normalizeClass(className) {
 }
 function delay(ms) { return new Promise((resolve) => setTimeout(resolve, ms)); }
 
+function selectedFiles(input) { return Array.from(input.files || []); }
+
+function hasSelectedModelFiles() {
+  return selectedFiles(ui.modelFileInput).length === 1
+    && selectedFiles(ui.weightsFileInput).length > 0
+    && selectedFiles(ui.metadataFileInput).length === 1;
+}
+
+function getSelectedModelSource() {
+  if (!hasSelectedModelFiles()) {
+    throw new Error("model.json, metadata.json, weights.bin을 함께 선택해주세요.");
+  }
+  return {
+    type:"files",
+    modelFile:selectedFiles(ui.modelFileInput)[0],
+    weightFiles:selectedFiles(ui.weightsFileInput),
+    metadataFile:selectedFiles(ui.metadataFileInput)[0],
+  };
+}
+
+function setFileInputsInvalid(invalid) {
+  const value = invalid ? "true" : "false";
+  ui.modelFileInput.setAttribute("aria-invalid", value);
+  ui.weightsFileInput.setAttribute("aria-invalid", value);
+  ui.metadataFileInput.setAttribute("aria-invalid", value);
+}
+
+function fileBasename(path) {
+  return typeof path === "string" ? path.replaceAll("\\", "/").split("/").pop() : "";
+}
+
+async function readJsonFile(file, label, maxBytes) {
+  if (!file || file.size === 0) throw new Error(`${label} 파일이 비어 있어요.`);
+  if (Number.isFinite(file.size) && file.size > maxBytes) throw new Error(`${label} 파일이 너무 커요.`);
+  try { return JSON.parse(await file.text()); }
+  catch (error) { throw new Error(`${label} 파일을 읽을 수 없어요. Teachable Machine에서 다시 내려받아주세요.`); }
+}
+
+function matchWeightFiles(modelDefinition, weightFiles) {
+  if (!modelDefinition?.modelTopology || typeof modelDefinition.modelTopology !== "object"
+    || !Array.isArray(modelDefinition.weightsManifest) || modelDefinition.weightsManifest.length === 0) {
+    throw new Error("model.json이 Teachable Machine 모델 형식이 아니에요.");
+  }
+  const expectedNames = modelDefinition.weightsManifest.flatMap((group) => Array.isArray(group.paths) ? group.paths.map(fileBasename) : []);
+  if (expectedNames.length === 0 || expectedNames.some((name) => !name) || new Set(expectedNames).size !== expectedNames.length) {
+    throw new Error("model.json의 가중치 목록을 확인할 수 없어요.");
+  }
+  const filesByName = new Map();
+  if (weightFiles.length > MAX_WEIGHT_FILES) throw new Error(`가중치 파일은 최대 ${MAX_WEIGHT_FILES}개까지 선택할 수 있어요.`);
+  const totalBytes = weightFiles.reduce((total, file) => total + (Number.isFinite(file?.size) ? file.size : 0), 0);
+  if (totalBytes > MAX_WEIGHT_BYTES) throw new Error("가중치 파일의 전체 크기는 64MB 이하여야 해요.");
+  for (const file of weightFiles) {
+    if (!file || file.size === 0) throw new Error("가중치 파일이 비어 있어요.");
+    if (filesByName.has(file.name)) throw new Error(`가중치 파일 ${file.name}이 중복으로 선택됐어요.`);
+    filesByName.set(file.name, file);
+  }
+  const missing = expectedNames.filter((name) => !filesByName.has(name));
+  const extra = [...filesByName.keys()].filter((name) => !expectedNames.includes(name));
+  if (missing.length || extra.length) {
+    throw new Error("model.json과 가중치 파일이 서로 맞지 않아요. 같은 다운로드 묶음의 파일을 선택해주세요.");
+  }
+  return expectedNames.map((name) => filesByName.get(name));
+}
+
 function updateControls() {
   const busy = !pageActive || modelLoading || cameraStarting || playing;
   ui.startButton.disabled = busy || !model || predictionFailed;
   ui.saveModelButton.disabled = busy;
+  ui.uploadModelButton.disabled = busy || !hasSelectedModelFiles();
+  ui.modelFileInput.disabled = busy;
+  ui.weightsFileInput.disabled = busy;
+  ui.metadataFileInput.disabled = busy;
   ui.resetButton.disabled = !pageActive || playing;
+  ui.uploadModelButton.textContent = modelLoadingSource === "files" ? "모델 확인 중…" : "선택한 모델 적용";
+  ui.saveModelButton.textContent = modelLoadingSource === "bundled" ? "기본 모델 불러오는 중…" : "기본 모델 사용";
 }
 
 function setResult(message, result = "") {
@@ -111,6 +190,65 @@ function validateClasses(labels, classCount = labels?.length) {
   }
 }
 
+function validateMetadata(metadata) {
+  validateClasses(metadata?.labels);
+  const imageSize = metadata?.imageSize ?? window.tmImage.IMAGE_SIZE ?? 224;
+  if (!Number.isInteger(imageSize) || imageSize <= 0 || imageSize > 4096) {
+    throw new Error("metadata.json의 이미지 크기 정보가 올바르지 않아요.");
+  }
+  if (metadata?.grayscale !== undefined && typeof metadata.grayscale !== "boolean") {
+    throw new Error("metadata.json의 색상 채널 정보가 올바르지 않아요.");
+  }
+}
+
+function validateModelInput(layersModel, metadata) {
+  const imageSize = metadata?.imageSize ?? window.tmImage.IMAGE_SIZE ?? 224;
+  const channels = metadata?.grayscale === true ? 1 : 3;
+  const shape = layersModel?.inputs?.[0]?.shape;
+  const outputShape = layersModel?.outputs?.[0]?.shape;
+  if ((metadata?.grayscale !== undefined && typeof metadata.grayscale !== "boolean")
+    || !Number.isInteger(imageSize) || imageSize <= 0
+    || layersModel?.inputs?.length !== 1 || !Array.isArray(shape) || shape.length !== 4
+    || (shape[0] !== null && shape[0] !== 1) || shape[1] !== imageSize || shape[2] !== imageSize || shape[3] !== channels
+    || layersModel?.outputs?.length !== 1 || !Array.isArray(outputShape) || outputShape.length !== 2
+    || (outputShape[0] !== null && outputShape[0] !== 1) || outputShape[1] !== choiceNames.length) {
+    throw new Error("모델의 입력·출력 규격과 metadata.json 정보가 서로 맞지 않아요.");
+  }
+}
+
+function modelSourceName(source, metadata) {
+  if (source.type === "bundled") return "기본 모델";
+  const name = typeof metadata?.modelName === "string" ? metadata.modelName.trim() : "";
+  return name ? `업로드 · ${name.slice(0, 60)}` : "업로드 모델";
+}
+
+async function loadModelAssets(source, isCurrent) {
+  let metadata;
+  let layersModel;
+  if (source.type === "files") {
+    metadata = await readJsonFile(source.metadataFile, "metadata.json", MAX_METADATA_BYTES);
+    if (!isCurrent()) return null;
+    validateMetadata(metadata);
+    const modelDefinition = await readJsonFile(source.modelFile, "model.json", MAX_MODEL_JSON_BYTES);
+    if (!isCurrent()) return null;
+    const orderedWeights = matchWeightFiles(modelDefinition, source.weightFiles);
+    try { layersModel = await tf.loadLayersModel(tf.io.browserFiles([source.modelFile, ...orderedWeights])); }
+    catch (error) {
+      console.error("업로드한 모델 파일을 불러오지 못했습니다.", error);
+      throw new Error("model.json과 가중치 파일이 서로 맞지 않아요. 같은 다운로드 묶음의 파일을 선택해주세요.");
+    }
+  } else {
+    const response = await fetch(METADATA_URL);
+    if (!isCurrent()) return null;
+    if (!response.ok) throw new Error("model/metadata.json 파일을 확인해주세요.");
+    metadata = await response.json();
+    if (!isCurrent()) return null;
+    validateMetadata(metadata);
+    layersModel = await tf.loadLayersModel(MODEL_URL);
+  }
+  return { layersModel, metadata };
+}
+
 function disposeModel(layersModel) {
   if (!layersModel) return;
   // 이 번들의 CustomMobileNet.dispose() 대신 실제 TensorFlow 모델을 해제합니다.
@@ -141,42 +279,49 @@ function schedulePrediction() {
   }
 }
 
-async function loadModel() {
+async function loadModel(source = DEFAULT_MODEL_SOURCE) {
   if (!pageActive || modelLoading || cameraStarting || playing) return false;
   const version = lifecycleVersion;
   let layersModel = null;
+  const isCurrent = () => pageActive && version === lifecycleVersion;
   modelLoading = true;
+  modelLoadingSource = source.type;
+  if (!model) ui.modelSource.textContent = "확인 중";
   cancelPredictionFrame();
   clearPrediction("모델 준비 중");
   updateControls();
   setModelStatus("모델을 불러오는 중…");
   setResult(modelLoadingMessage);
   try {
-    if (!window.tmImage || !window.tf) throw new Error("로컬 AI 라이브러리를 불러오지 못했습니다.");
+    if (!window.tmImage || !window.tf || !window.tf.io) throw new Error("로컬 AI 라이브러리를 불러오지 못했습니다.");
     if (predictionTask) await predictionTask;
-    if (!pageActive || version !== lifecycleVersion) return false;
-    // 메타데이터부터 검사해 실패한 로딩에 TensorFlow 모델이 남지 않게 합니다.
-    const response = await fetch(METADATA_URL);
-    if (!pageActive || version !== lifecycleVersion) return false;
-    if (!response.ok) throw new Error("model/metadata.json 파일을 확인해주세요.");
-    const metadata = await response.json();
-    if (!pageActive || version !== lifecycleVersion) return false;
-    validateClasses(metadata?.labels);
-    layersModel = await tf.loadLayersModel(MODEL_URL);
-    if (!pageActive || version !== lifecycleVersion) return false;
+    if (!isCurrent()) return false;
+    // 파일과 메타데이터를 먼저 검사해 실패한 로딩에 TensorFlow 모델이 남지 않게 합니다.
+    const loaded = await loadModelAssets(source, isCurrent);
+    if (!loaded) return false;
+    ({ layersModel } = loaded);
+    const { metadata } = loaded;
+    if (!isCurrent()) return false;
+    validateModelInput(layersModel, metadata);
     const candidate = new tmImage.CustomMobileNet(layersModel, metadata);
     validateClasses(candidate.getClassLabels(), candidate.getTotalClasses());
     const previousModel = model;
     model = candidate;
     layersModel = null;
     disposeModel(previousModel?.model);
+    activeModelSource = source;
     predictionFailed = false;
-    setModelStatus(`연결 완료 · 클래스 ${model.getTotalClasses()}개`);
+    const sourceName = modelSourceName(source, metadata);
+    ui.modelSource.textContent = sourceName;
+    setFileInputsInvalid(false);
+    setModelStatus(`연결 완료 · ${sourceName} · 클래스 ${model.getTotalClasses()}개`);
     clearPrediction("모델 준비 완료");
     setResult(cameraRunning ? readyPrompt : cameraPrompt);
     return true;
   } catch (error) {
-    if (!pageActive || version !== lifecycleVersion) return false;
+    if (!isCurrent()) return false;
+    if (source.type === "files") setFileInputsInvalid(true);
+    if (!model) ui.modelSource.textContent = "연결 안 됨";
     setModelStatus(`모델 연결 실패 · ${error.message || "model 폴더의 세 파일을 확인해주세요."}${model ? " 기존 모델을 계속 사용합니다." : ""}`, true);
     clearPrediction(model ? (predictionFailed ? "인식 오류" : "모델 준비 완료") : "모델 연결 실패");
     setResult(predictionFailed ? predictionErrorMessage
@@ -187,9 +332,19 @@ async function loadModel() {
     disposeModel(layersModel);
     if (version === lifecycleVersion) {
       modelLoading = false;
+      modelLoadingSource = null;
       updateControls();
       schedulePrediction();
     }
+  }
+}
+
+async function loadUploadedModel() {
+  try { return await loadModel(getSelectedModelSource()); }
+  catch (error) {
+    setFileInputsInvalid(true);
+    setModelStatus(error.message, true);
+    return false;
   }
 }
 
@@ -197,7 +352,7 @@ async function startCamera() {
   if (!pageActive || modelLoading || cameraStarting || cameraRunning) return;
   if (!model) {
     ui.settingsDialog.showModal();
-    setModelStatus("model 폴더에 내보낸 모델 파일을 넣어주세요.", true);
+    setModelStatus("설정에서 기본 모델을 다시 불러오거나 내 모델 파일을 선택해주세요.", true);
     return;
   }
   const version = lifecycleVersion;
@@ -326,6 +481,7 @@ window.addEventListener("pagehide", () => {
   stopWebcam(startingWebcam);
   webcam = startingWebcam = null;
   cameraRunning = cameraStarting = modelLoading = playing = false;
+  modelLoadingSource = null;
   clearPrediction("모델 준비 중");
   predictionFailed = false;
   const previousModel = model;
@@ -341,12 +497,26 @@ window.addEventListener("pagehide", () => {
 window.addEventListener("pageshow", (event) => {
   if (!event.persisted) return;
   pageActive = true;
-  loadModel();
+  loadModel(activeModelSource);
 });
 
 ui.settingsButton.addEventListener("click", () => ui.settingsDialog.showModal());
+for (const input of [ui.modelFileInput, ui.weightsFileInput, ui.metadataFileInput]) {
+  input.addEventListener("change", () => {
+    setFileInputsInvalid(false);
+    updateControls();
+    const selectedCount = selectedFiles(ui.modelFileInput).length
+      + selectedFiles(ui.weightsFileInput).length
+      + selectedFiles(ui.metadataFileInput).length;
+    if (hasSelectedModelFiles()) setModelStatus(`${selectedCount}개 파일을 선택했습니다. 적용할 준비가 됐어요.`);
+    else if (selectedCount > 0) setModelStatus("model.json, metadata.json, 모든 가중치 파일을 선택해주세요.");
+  });
+}
+ui.uploadModelButton.addEventListener("click", async () => {
+  await loadUploadedModel();
+});
 ui.saveModelButton.addEventListener("click", async () => {
-  if (await loadModel()) ui.settingsDialog.close();
+  await loadModel(DEFAULT_MODEL_SOURCE);
 });
 ui.startButton.addEventListener("click", () => cameraRunning ? playRound() : startCamera());
 ui.resetButton.addEventListener("click", () => {
