@@ -406,6 +406,11 @@ async function predictFrame() {
     activeWebcam.update();
     const predictions = await activeModel.predict(activeWebcam.canvas);
     if (!pageActive || version !== lifecycleVersion || modelLoading) return;
+    if (!Array.isArray(predictions) || predictions.length === 0
+      || predictions.some((prediction) => !Number.isFinite(prediction?.probability)
+        || prediction.probability < 0 || prediction.probability > 1)) {
+      throw new Error("모델이 올바르지 않은 예측 확률을 반환했습니다.");
+    }
     const best = predictions.reduce((a,b) => a.probability > b.probability ? a : b);
     const choice = normalizeClass(best.className);
     latestPrediction = choice ? { choice, confidence:best.probability } : null;

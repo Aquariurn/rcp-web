@@ -762,6 +762,38 @@ for (const cause of ["predict", "webcam", "empty predictions"]) {
   });
 }
 
+for (const probability of [NaN, Infinity, -Infinity, undefined, null, "0.96", -0.1, 1.1]) {
+  test(`invalid probability (${String(probability)}) cancels scoring and recovers on valid predictions`, async () => {
+    const f = await runningFixture();
+    const round = f.run("playRound()");
+    // A valid highest score must not hide another class's invalid probability.
+    f.defaultModel.control.predictions = [
+      { className: "가위", probability },
+      { className: "바위", probability: 0.96 },
+    ];
+    await f.frame();
+    assert.equal(f.run("latestPrediction"), null);
+    assert.equal(f.ui("prediction").textContent, "인식 오류");
+    assert.equal(f.ui("confidence").textContent, "—");
+    await f.finish(round);
+    assert.deepEqual(scores(f), [0, 0, 0]);
+    assertRoundFinished(f, { failed: true });
+    await f.run("playRound()");
+    assert.equal(f.timers.size, 0);
+
+    f.defaultModel.control.predictions = [
+      { className: "가위", probability: 0 },
+      { className: "바위", probability: 1 },
+      { className: "보", probability: 0 },
+    ];
+    await f.frame();
+    assert.equal(f.ui("confidence").textContent, "100%");
+    assert.equal(f.ui("startButton").disabled, false);
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], 1);
+  });
+}
+
 for (const [outcome, random, expected] of [["win", 0, [1, 0, 1]], ["lose", 0.99, [0, 1, 1]], ["draw", 0.5, [0, 0, 1]]]) {
   test(`${outcome} scoring preserves reset protection and restores controls`, async () => {
     const f = await runningFixture();
