@@ -107,7 +107,7 @@ function fixture({ initial, events = [] } = {}) {
   const timers = new Map();
   const cameras = [];
   const page = element();
-  const control = { loadCalls: 0, timerCalls: 0, timerErrorAt: 0, setup: null, play: null, updateError: null };
+  const control = { now: 0, loadCalls: 0, timerCalls: 0, timerErrorAt: 0, setup: null, play: null, updateError: null };
   let nextId = 1;
   let preparedLoad;
   const tf = {
@@ -138,7 +138,18 @@ function fixture({ initial, events = [] } = {}) {
       }
     },
     Webcam: class {
-      constructor() { this.canvas = {}; this.tracks = [{ stops: 0, stop() { this.stops += 1; } }]; cameras.push(this); }
+      constructor() {
+        this.canvas = {};
+        const listeners = new Set();
+        this.tracks = [{
+          stops: 0, readyState: "live", listeners,
+          addEventListener(name, listener) { if (name === "ended") listeners.add(listener); },
+          removeEventListener(name, listener) { if (name === "ended") listeners.delete(listener); },
+          stop() { this.stops += 1; this.readyState = "ended"; },
+          end() { this.readyState = "ended"; for (const listener of [...listeners]) listener(); },
+        }];
+        cameras.push(this);
+      }
       async setup() {
         if (control.setup) await control.setup.promise;
         this.webcam = { srcObject: { getTracks: () => this.tracks }, pause() {} };
@@ -161,6 +172,7 @@ function fixture({ initial, events = [] } = {}) {
     },
   };
   const context = vm.createContext({
+    performance: { now: () => control.now },
     window: { tmImage, tf, addEventListener: page.addEventListener.bind(page) }, tmImage, tf,
     async fetch() {
       assert.ok(loads.length, "unexpected concurrent or duplicate metadata load");
@@ -686,6 +698,117 @@ for (const stage of ["setup", "play"]) {
   });
 }
 
+test("camera disconnection preserves scores and model and allows restart", async () => {
+  const f = await runningFixture();
+  await f.finish(f.run("playRound()"));
+  const before = scores(f);
+  const camera = f.cameras[0];
+  const oldListener = [...camera.tracks[0].listeners][0];
+  camera.tracks[0].end();
+  assert.equal(f.run("latestPrediction"), null);
+  assert.equal(f.frames.size, 0);
+  assert.equal(camera.webcam.srcObject, null);
+  assert.equal(camera.tracks[0].listeners.size, 0);
+  assert.equal(f.ui("cameraPlaceholder").hidden, false);
+  assert.equal(f.ui("startButtonText").textContent, "카메라 켜기");
+  assert.match(f.ui("resultText").textContent, /연결이 끊겼/);
+  assert.equal(f.defaultModel.disposed, 0);
+  assertRoundFinished(f);
+  assert.deepEqual(scores(f), before);
+  await f.run("startCamera()");
+  oldListener();
+  assert.equal(f.run("cameraRunning"), true, "an old camera event cannot stop the new camera");
+  await f.frame();
+  await f.finish(f.run("playRound()"));
+  assert.equal(scores(f)[2], before[2] + 1);
+});
+
+for (const rejects of [false, true]) {
+  test(`disconnected camera's late prediction ${rejects ? "error" : "result"} cannot change a restarted camera`, async () => {
+    const f = await runningFixture();
+    const pending = deferred();
+    f.defaultModel.control.pending = pending;
+    const prediction = f.beginFrame();
+    f.cameras[0].tracks[0].end();
+    await f.run("startCamera()");
+    const text = f.ui("resultText").textContent;
+    if (rejects) pending.reject(new Error("old camera prediction failed"));
+    else pending.resolve([{ className: "보", probability: 0.99 }]);
+    await prediction;
+    assert.equal(f.run("latestPrediction"), null);
+    assert.equal(f.run("predictionFailed"), false);
+    assert.equal(f.ui("resultText").textContent, text);
+    assert.equal(f.frames.size, 1);
+    f.defaultModel.control.pending = null;
+    await f.frame();
+    assert.equal(f.ui("prediction").textContent, "바위");
+  });
+}
+
+test("disconnect cancels an old round without clearing a new round's controls", async () => {
+  const f = await runningFixture();
+  const oldRound = f.run("playRound()");
+  f.cameras[0].tracks[0].end();
+  assertRoundFinished(f);
+  await f.run("startCamera()");
+  await f.frame();
+  const newRound = f.run("playRound()");
+  const [oldTimer, callback] = f.timers.entries().next().value;
+  f.timers.delete(oldTimer);
+  callback();
+  await oldRound;
+  assert.equal(f.run("playing"), true);
+  assert.equal(f.ui("resetButton").disabled, true);
+  assert.equal(f.ui("countdown").classList.contains("show"), true);
+  assert.deepEqual(scores(f), [0, 0, 0]);
+  await f.finish(newRound);
+  assert.equal(scores(f)[2], 1);
+});
+
+for (const alreadyEnded of [false, true]) {
+  test(`camera ending ${alreadyEnded ? "before listener registration" : "during play startup"} allows a clean retry`, async () => {
+    const f = fixture();
+    await flush();
+    const pending = deferred();
+    if (alreadyEnded) f.control.setup = pending;
+    else f.control.play = pending;
+    const start = f.run("startCamera()");
+    await flush();
+    f.cameras[0].tracks[0].end();
+    if (alreadyEnded) { pending.resolve(); await start; }
+    assert.equal(f.run("cameraStarting"), false);
+    assert.equal(f.run("cameraRunning"), false);
+    assert.equal(f.ui("startButton").disabled, false);
+    assert.match(f.ui("resultText").textContent, /연결이 끊겼/);
+    f.control.setup = f.control.play = null;
+    await f.run("startCamera()");
+    if (!alreadyEnded) { pending.reject(new Error("old play failed")); await start; }
+    assert.equal(f.run("cameraRunning"), true);
+    assert.equal(f.ui("startButtonText").textContent, "승부하기");
+    assert.equal(f.cameras[0].tracks[0].listeners.size, 0);
+    await f.frame();
+  });
+}
+
+test("camera ending during model replacement does not cancel or strand the load", async () => {
+  const f = await runningFixture();
+  const pending = deferred();
+  f.loads.push(pending);
+  const load = f.run("loadModel()");
+  await flush();
+  f.cameras[0].tracks[0].end();
+  assert.equal(f.run("modelLoading"), true);
+  const replacement = f.candidate("replacement");
+  pending.resolve(replacement);
+  assert.equal(await load, true);
+  assert.equal(f.run("modelLoading"), false);
+  assert.equal(f.defaultModel.disposed, 1);
+  assert.equal(replacement.disposed, 0);
+  assert.equal(f.ui("startButtonText").textContent, "카메라 켜기");
+  await f.run("startCamera()");
+  await f.frame();
+});
+
 test("pagehide stops the camera, cancels prediction frames, and disposes the model once", async () => {
   const f = await runningFixture();
   f.hide(); f.hide();
@@ -762,6 +885,38 @@ for (const cause of ["predict", "webcam", "empty predictions"]) {
   });
 }
 
+for (const probability of [NaN, Infinity, -Infinity, undefined, null, "0.96", -0.1, 1.1]) {
+  test(`invalid probability (${String(probability)}) cancels scoring and recovers on valid predictions`, async () => {
+    const f = await runningFixture();
+    const round = f.run("playRound()");
+    // A valid highest score must not hide another class's invalid probability.
+    f.defaultModel.control.predictions = [
+      { className: "가위", probability },
+      { className: "바위", probability: 0.96 },
+    ];
+    await f.frame();
+    assert.equal(f.run("latestPrediction"), null);
+    assert.equal(f.ui("prediction").textContent, "인식 오류");
+    assert.equal(f.ui("confidence").textContent, "—");
+    await f.finish(round);
+    assert.deepEqual(scores(f), [0, 0, 0]);
+    assertRoundFinished(f, { failed: true });
+    await f.run("playRound()");
+    assert.equal(f.timers.size, 0);
+
+    f.defaultModel.control.predictions = [
+      { className: "가위", probability: 0 },
+      { className: "바위", probability: 1 },
+      { className: "보", probability: 0 },
+    ];
+    await f.frame();
+    assert.equal(f.ui("confidence").textContent, "100%");
+    assert.equal(f.ui("startButton").disabled, false);
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], 1);
+  });
+}
+
 for (const [outcome, random, expected] of [["win", 0, [1, 0, 1]], ["lose", 0.99, [0, 1, 1]], ["draw", 0.5, [0, 0, 1]]]) {
   test(`${outcome} scoring preserves reset protection and restores controls`, async () => {
     const f = await runningFixture();
@@ -782,6 +937,56 @@ for (const predictions of [[{ className: "바위", probability: 0.3 }], [{ class
     await f.finish(f.run("playRound()"), () => protectReset(f));
     assert.deepEqual(scores(f), [0, 0, 0]);
     assertRoundFinished(f);
+  });
+}
+
+for (const resolvesBeforeJudgment of [false, true]) {
+  test(`stale frame does not score when slow inference ${resolvesBeforeJudgment ? "finishes late" : "remains pending"}`, async () => {
+    const f = await runningFixture();
+    const pending = deferred();
+    f.defaultModel.control.pending = pending;
+    const prediction = f.beginFrame();
+    const round = f.run("playRound()");
+    // Advance a monotonic clock through the actual countdown, without sleeping.
+    for (const elapsed of [650, 120, 650, 120, 650]) {
+      f.control.now += elapsed;
+      await f.tick();
+    }
+    if (resolvesBeforeJudgment) {
+      pending.resolve([{ className: "보", probability: 0.99 }]);
+      await prediction;
+    }
+    f.control.now += 120;
+    await f.tick();
+    await round;
+    assert.deepEqual(scores(f), [0, 0, 0]);
+    assert.match(f.ui("resultText").textContent, /최근|지연/);
+    assert.equal(f.run("latestPrediction"), null);
+    assert.equal(f.ui("confidence").textContent, "—");
+    assertRoundFinished(f);
+    if (!resolvesBeforeJudgment) {
+      pending.resolve([{ className: "보", probability: 0.99 }]);
+      await prediction;
+    }
+    f.defaultModel.control.pending = null;
+    await f.frame();
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], 1, "a fresh prediction allows the next round to score");
+  });
+}
+
+for (const age of [1000, 1001]) {
+  test(`prediction age ${age}ms respects freshness limit even with another inference pending`, async () => {
+    const f = await runningFixture();
+    const pending = deferred();
+    f.defaultModel.control.pending = pending;
+    const prediction = f.beginFrame();
+    f.control.now = age;
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], age === 1000 ? 1 : 0);
+    assertRoundFinished(f);
+    pending.resolve([{ className: "바위", probability: 0.96 }]);
+    await prediction;
   });
 }
 

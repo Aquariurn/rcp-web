@@ -30,6 +30,7 @@ const MAX_WEIGHT_FILES = 32;
 const WEBCAM_WIDTH = 480;
 const WEBCAM_HEIGHT = 360;
 const MIN_PREDICTION_CONFIDENCE = 0.55;
+const MAX_PREDICTION_AGE_MS = 1000;
 const COUNTDOWN_VALUES = [3, 2, 1];
 const COUNTDOWN_VISIBLE_MS = 650;
 const COUNTDOWN_GAP_MS = 120;
@@ -261,7 +262,37 @@ function disposeModel(layersModel) {
   catch (error) { console.error("모델 자원을 정리하지 못했습니다.", error); }
 }
 
+const cameraEndListeners = new WeakMap();
+
+function handleCameraEnded(camera) {
+  if (!pageActive || (camera !== webcam && camera !== startingWebcam)) return;
+  cancelPredictionFrame();
+  stopWebcam(camera);
+  webcam = startingWebcam = null;
+  cameraRunning = cameraStarting = playing = false;
+  predictionFailed = false;
+  clearPrediction("카메라 연결 끊김");
+  renderCamera();
+  clearCountdown();
+  ui.startButtonText.textContent = "카메라 켜기";
+  setResult("카메라 연결이 끊겼어요. 연결과 권한을 확인한 뒤 카메라를 다시 켜주세요.");
+  updateControls();
+}
+
+function watchCameraEnd(camera) {
+  const tracks = camera.webcam.srcObject.getTracks();
+  const onEnded = () => handleCameraEnded(camera);
+  for (const track of tracks) track.addEventListener("ended", onEnded);
+  cameraEndListeners.set(camera, { tracks, onEnded });
+  if (tracks.some((track) => track.readyState === "ended")) onEnded();
+}
+
 function stopWebcam(camera) {
+  const listener = cameraEndListeners.get(camera);
+  if (listener) {
+    for (const track of listener.tracks) track.removeEventListener("ended", listener.onEnded);
+    cameraEndListeners.delete(camera);
+  }
   const video = camera?.webcam;
   if (!video?.srcObject) return;
   video.srcObject.getTracks().forEach((track) => track.stop());
@@ -364,8 +395,10 @@ async function startCamera() {
     startingWebcam = candidate;
     await candidate.setup();
     if (!pageActive || version !== lifecycleVersion) return;
+    watchCameraEnd(candidate);
+    if (startingWebcam !== candidate) return;
     await candidate.play();
-    if (!pageActive || version !== lifecycleVersion) return;
+    if (!pageActive || version !== lifecycleVersion || startingWebcam !== candidate) return;
     webcam = candidate;
     cameraRunning = true;
     renderCamera();
@@ -373,14 +406,14 @@ async function startCamera() {
     setResult(readyPrompt);
     schedulePrediction();
   } catch (error) {
-    if (!pageActive || version !== lifecycleVersion) return;
+    if (!pageActive || version !== lifecycleVersion || startingWebcam !== candidate) return;
     cameraRunning = false;
     webcam = null;
     renderCamera();
     setResult("카메라를 열 수 없어요. 브라우저의 카메라 권한을 확인해주세요.");
   } finally {
     if (webcam !== candidate) stopWebcam(candidate);
-    if (version === lifecycleVersion) {
+    if (version === lifecycleVersion && startingWebcam === candidate) {
       cameraStarting = false;
       startingWebcam = null;
       updateControls();
@@ -403,12 +436,19 @@ async function predictFrame() {
   const activeWebcam = webcam;
   const version = lifecycleVersion;
   try {
+    // Use the input frame time: slow inference must not make an old frame look fresh.
+    const capturedAt = performance.now();
     activeWebcam.update();
     const predictions = await activeModel.predict(activeWebcam.canvas);
-    if (!pageActive || version !== lifecycleVersion || modelLoading) return;
+    if (!pageActive || version !== lifecycleVersion || activeWebcam !== webcam || modelLoading) return;
+    if (!Array.isArray(predictions) || predictions.length === 0
+      || predictions.some((prediction) => !Number.isFinite(prediction?.probability)
+        || prediction.probability < 0 || prediction.probability > 1)) {
+      throw new Error("모델이 올바르지 않은 예측 확률을 반환했습니다.");
+    }
     const best = predictions.reduce((a,b) => a.probability > b.probability ? a : b);
     const choice = normalizeClass(best.className);
-    latestPrediction = choice ? { choice, confidence:best.probability } : null;
+    latestPrediction = choice ? { choice, confidence:best.probability, capturedAt } : null;
     ui.prediction.textContent = choice ? choices[choice].label : best.className;
     ui.confidence.textContent = `${Math.round(best.probability * 100)}%`;
     if (predictionFailed) {
@@ -417,7 +457,7 @@ async function predictFrame() {
       setResult(playing ? roundPrompt : "다시 손 모양을 인식하고 있어요. 준비됐다면 승부하기 버튼을 눌러주세요.");
     }
   } catch (error) {
-    if (!pageActive || version !== lifecycleVersion || modelLoading) return;
+    if (!pageActive || version !== lifecycleVersion || activeWebcam !== webcam || modelLoading) return;
     if (!predictionFailed) console.error("손 모양 추론에 실패했습니다.", error);
     predictionFailed = true;
     clearPrediction("인식 오류");
@@ -429,6 +469,8 @@ async function predictFrame() {
 async function playRound() {
   if (!pageActive || !cameraRunning || playing || predictionFailed || modelLoading || !model) return;
   const version = lifecycleVersion;
+  const roundCamera = webcam;
+  const isCurrentRound = () => pageActive && version === lifecycleVersion && roundCamera === webcam;
   playing = true;
   try {
     updateControls();
@@ -437,10 +479,16 @@ async function playRound() {
       ui.countdown.textContent = value;
       ui.countdown.classList.add("show");
       await delay(COUNTDOWN_VISIBLE_MS);
-      if (!pageActive || version !== lifecycleVersion) return;
+      if (!isCurrentRound()) return;
       ui.countdown.classList.remove("show");
       await delay(COUNTDOWN_GAP_MS);
-      if (!pageActive || version !== lifecycleVersion) return;
+      if (!isCurrentRound()) return;
+    }
+    if (!predictionFailed && latestPrediction
+      && performance.now() - latestPrediction.capturedAt > MAX_PREDICTION_AGE_MS) {
+      clearPrediction("최근 인식 대기");
+      setResult("최근 손 모양을 확인하지 못했어요. 인식이 갱신되면 다시 시도해주세요.");
+      return;
     }
     if (predictionFailed || !latestPrediction || latestPrediction.confidence < MIN_PREDICTION_CONFIDENCE) {
       setResult(predictionFailed
@@ -459,13 +507,13 @@ async function playRound() {
     setResult(`${choices[player].label} vs ${choices[computer].label} — ${roundMessages[result]}`, result);
     ui.startButtonText.textContent = "한 판 더";
   } catch (error) {
-    if (!pageActive || version !== lifecycleVersion) return;
+    if (!isCurrentRound()) return;
     console.error("승부 처리에 실패했습니다.", error);
     setResult(predictionFailed
       ? predictionErrorMessage
       : "승부를 진행하지 못했어요. 다시 시도해주세요.");
   } finally {
-    if (version === lifecycleVersion) {
+    if (isCurrentRound()) {
       playing = false;
       updateControls();
       clearCountdown();
