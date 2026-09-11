@@ -107,7 +107,7 @@ function fixture({ initial, events = [] } = {}) {
   const timers = new Map();
   const cameras = [];
   const page = element();
-  const control = { loadCalls: 0, timerCalls: 0, timerErrorAt: 0, setup: null, play: null, updateError: null };
+  const control = { now: 0, loadCalls: 0, timerCalls: 0, timerErrorAt: 0, setup: null, play: null, updateError: null };
   let nextId = 1;
   let preparedLoad;
   const tf = {
@@ -161,6 +161,7 @@ function fixture({ initial, events = [] } = {}) {
     },
   };
   const context = vm.createContext({
+    performance: { now: () => control.now },
     window: { tmImage, tf, addEventListener: page.addEventListener.bind(page) }, tmImage, tf,
     async fetch() {
       assert.ok(loads.length, "unexpected concurrent or duplicate metadata load");
@@ -814,6 +815,56 @@ for (const predictions of [[{ className: "바위", probability: 0.3 }], [{ class
     await f.finish(f.run("playRound()"), () => protectReset(f));
     assert.deepEqual(scores(f), [0, 0, 0]);
     assertRoundFinished(f);
+  });
+}
+
+for (const resolvesBeforeJudgment of [false, true]) {
+  test(`stale frame does not score when slow inference ${resolvesBeforeJudgment ? "finishes late" : "remains pending"}`, async () => {
+    const f = await runningFixture();
+    const pending = deferred();
+    f.defaultModel.control.pending = pending;
+    const prediction = f.beginFrame();
+    const round = f.run("playRound()");
+    // Advance a monotonic clock through the actual countdown, without sleeping.
+    for (const elapsed of [650, 120, 650, 120, 650]) {
+      f.control.now += elapsed;
+      await f.tick();
+    }
+    if (resolvesBeforeJudgment) {
+      pending.resolve([{ className: "보", probability: 0.99 }]);
+      await prediction;
+    }
+    f.control.now += 120;
+    await f.tick();
+    await round;
+    assert.deepEqual(scores(f), [0, 0, 0]);
+    assert.match(f.ui("resultText").textContent, /최근|지연/);
+    assert.equal(f.run("latestPrediction"), null);
+    assert.equal(f.ui("confidence").textContent, "—");
+    assertRoundFinished(f);
+    if (!resolvesBeforeJudgment) {
+      pending.resolve([{ className: "보", probability: 0.99 }]);
+      await prediction;
+    }
+    f.defaultModel.control.pending = null;
+    await f.frame();
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], 1, "a fresh prediction allows the next round to score");
+  });
+}
+
+for (const age of [1000, 1001]) {
+  test(`prediction age ${age}ms respects freshness limit even with another inference pending`, async () => {
+    const f = await runningFixture();
+    const pending = deferred();
+    f.defaultModel.control.pending = pending;
+    const prediction = f.beginFrame();
+    f.control.now = age;
+    await f.finish(f.run("playRound()"));
+    assert.equal(scores(f)[2], age === 1000 ? 1 : 0);
+    assertRoundFinished(f);
+    pending.resolve([{ className: "바위", probability: 0.96 }]);
+    await prediction;
   });
 }
 

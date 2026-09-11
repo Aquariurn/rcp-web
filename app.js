@@ -30,6 +30,7 @@ const MAX_WEIGHT_FILES = 32;
 const WEBCAM_WIDTH = 480;
 const WEBCAM_HEIGHT = 360;
 const MIN_PREDICTION_CONFIDENCE = 0.55;
+const MAX_PREDICTION_AGE_MS = 1000;
 const COUNTDOWN_VALUES = [3, 2, 1];
 const COUNTDOWN_VISIBLE_MS = 650;
 const COUNTDOWN_GAP_MS = 120;
@@ -403,6 +404,8 @@ async function predictFrame() {
   const activeWebcam = webcam;
   const version = lifecycleVersion;
   try {
+    // Use the input frame time: slow inference must not make an old frame look fresh.
+    const capturedAt = performance.now();
     activeWebcam.update();
     const predictions = await activeModel.predict(activeWebcam.canvas);
     if (!pageActive || version !== lifecycleVersion || modelLoading) return;
@@ -413,7 +416,7 @@ async function predictFrame() {
     }
     const best = predictions.reduce((a,b) => a.probability > b.probability ? a : b);
     const choice = normalizeClass(best.className);
-    latestPrediction = choice ? { choice, confidence:best.probability } : null;
+    latestPrediction = choice ? { choice, confidence:best.probability, capturedAt } : null;
     ui.prediction.textContent = choice ? choices[choice].label : best.className;
     ui.confidence.textContent = `${Math.round(best.probability * 100)}%`;
     if (predictionFailed) {
@@ -446,6 +449,12 @@ async function playRound() {
       ui.countdown.classList.remove("show");
       await delay(COUNTDOWN_GAP_MS);
       if (!pageActive || version !== lifecycleVersion) return;
+    }
+    if (!predictionFailed && latestPrediction
+      && performance.now() - latestPrediction.capturedAt > MAX_PREDICTION_AGE_MS) {
+      clearPrediction("최근 인식 대기");
+      setResult("최근 손 모양을 확인하지 못했어요. 인식이 갱신되면 다시 시도해주세요.");
+      return;
     }
     if (predictionFailed || !latestPrediction || latestPrediction.confidence < MIN_PREDICTION_CONFIDENCE) {
       setResult(predictionFailed
