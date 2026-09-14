@@ -136,12 +136,28 @@ node --test tests/app.test.cjs
 
 모델 로딩·검증·해제, 카메라 실패·페이지 이탈, 추론 오류 복구, 승패·점수 초기화를 검증합니다. 실제 모델의 CPU 추론과 가중치 해제도 확인합니다. 카메라 권한과 화면 표시는 브라우저에서 별도로 확인하세요.
 
+### PR 자동 테스트와 병합 조건
+
+`main`을 대상으로 PR을 생성하거나, 커밋을 추가하거나, 닫힌 PR을 다시 열면 `.github/workflows/pr-tests.yml`이 자동 테스트를 실행합니다. Draft PR도 검사하며, 같은 PR에 새 커밋이 올라오면 이전 검사를 취소하고 최신 변경을 검사합니다.
+
+PR의 **Checks → PR tests**에서 결과를 확인하세요. PR 검사는 읽기 권한만 사용하고 배포하지 않습니다. PR 검사와 배포 전 검사는 모두 Node.js 24에서 같은 테스트 명령을 실행합니다.
+
+**테스트 실행과 병합 차단은 별도 설정입니다.** 워크플로를 올린 PR에서 검사가 한 번 실행된 뒤 다음과 같이 저장소 설정을 완료하세요.
+
+1. **Settings → Branches**에서 `main` 대상 브랜치 보호 규칙을 생성하거나 수정합니다.
+2. **Require a pull request before merging**을 활성화합니다. 혼자 관리하는 경우 다른 사람의 승인까지 필수로 지정할 필요는 없습니다.
+3. **Require status checks to pass before merging**에서 **PR tests**를 필수 검사로 선택합니다.
+4. **Require branches to be up to date before merging**을 활성화해 최신 `main`과의 통합 결과를 검사합니다.
+5. 관리자를 포함해 같은 규칙을 적용하려면 **Do not allow bypassing the above settings**도 활성화합니다.
+
+필수 검사에는 배포 작업인 `Test and deploy`가 아닌 **PR tests**를 선택해야 합니다. 배포 작업은 병합 후에 실행되므로 PR의 병합 조건으로 사용하면 병합을 진행할 수 없습니다. 검사 이름을 변경할 때는 보호 규칙도 함께 갱신하세요.
+
 ### GitHub Pages 배포
 
 현재 워크플로는 `main`에 변경사항이 반영되면 **테스트 → 사이트 업로드 → Pages 배포** 순서로 실행됩니다.
 
 - PR을 `main`에 병합하거나 `main`에 직접 push하면 배포가 실행됩니다.
-- 기능 브랜치에 push하거나 PR을 생성하는 것만으로는 이 워크플로가 실행되지 않습니다.
+- 기능 브랜치의 push나 PR 생성은 배포를 실행하지 않습니다. 열린 PR에 커밋을 push하면 별도의 PR 테스트만 실행됩니다.
 - 테스트에 실패하면 해당 실행에서는 배포하지 않습니다.
 
 저장소의 **Settings → Pages → Build and deployment → Source**는 **GitHub Actions**로 설정합니다. 배포 진행 상황은 **Actions → Deploy GitHub Pages**에서 확인하고, 성공 후 실제 게임 주소에서도 동작을 확인하세요.
