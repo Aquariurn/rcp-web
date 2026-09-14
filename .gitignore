@@ -1,4 +1,8 @@
 .DS_Store
+node_modules/
+playwright-report/
+test-results/
+_site/
 
 # Teachable Machine 모델은 model/ 폴더의 사본만 사용합니다.
 vendor/rcp/
