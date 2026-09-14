@@ -18,6 +18,7 @@ jobs:
   deploy:
     name: Test and deploy
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -34,13 +35,39 @@ jobs:
       - name: Run tests
         run: node --test tests/app.test.cjs
 
+      - name: Install browser test dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: npm run test:e2e
+
+      - name: Upload browser test report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-test-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore
+
       - name: Configure GitHub Pages
         uses: actions/configure-pages@v6
+
+      - name: Prepare site files
+        run: |
+          mkdir -p _site
+          cp index.html styles.css app.js _site/
+          cp -R model vendor _site/
 
       - name: Upload site artifact
         uses: actions/upload-pages-artifact@v5
         with:
-          path: .
+          path: _site
 
       - name: Deploy to GitHub Pages
         id: deployment

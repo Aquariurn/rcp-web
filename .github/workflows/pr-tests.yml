@@ -16,7 +16,7 @@ jobs:
   test:
     name: PR tests
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - name: Check out repository
         uses: actions/checkout@v6
@@ -31,3 +31,23 @@ jobs:
 
       - name: Run tests
         run: node --test tests/app.test.cjs
+
+      - name: Install browser test dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run browser tests
+        run: npm run test:e2e
+
+      - name: Upload browser test report
+        if: ${{ failure() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: browser-test-report
+          path: |
+            playwright-report/
+            test-results/
+          retention-days: 7
+          if-no-files-found: ignore

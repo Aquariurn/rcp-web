@@ -1,0 +1,12 @@
+{
+  "name": "rcp-web",
+  "private": true,
+  "scripts": {
+    "test": "node --test tests/app.test.cjs",
+    "test:e2e": "playwright test",
+    "test:e2e:report": "playwright show-report"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.63.0"
+  }
+}
